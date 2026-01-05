@@ -5,6 +5,7 @@
 #include <vector>
 #include <tlhelp32.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <winternl.h>
 #include <Psapi.h>
 #include <mutex>
@@ -70,12 +71,10 @@ namespace mem {
     inline std::unordered_map<uintptr_t, std::string> g_ExportMap;
     inline bool x32 = false;
 
-    // Cache system
-    inline std::unordered_map<uintptr_t, std::pair<std::vector<uint8_t>, std::chrono::steady_clock::time_point>> g_ReadCache;
-    inline std::mutex g_CacheMutex;
-    inline constexpr std::chrono::milliseconds CACHE_DURATION{ 500 };
-
     inline bool g_NeedsModuleRefresh = false;
+
+    inline std::mutex g_MemoryMutex;
+    inline std::unordered_map<uintptr_t, std::vector<uint8_t>> g_MemorySnapshots;
 
     bool getProcessList();
     void getModules();
@@ -88,6 +87,7 @@ namespace mem {
 
     uintptr_t findPattern(uintptr_t start, uintptr_t size, const std::string& pattern);
     bool read(uintptr_t address, void* buf, uintptr_t size);
+    bool read_blocking(uintptr_t address, void* buf, uintptr_t size);
     bool write(uintptr_t address, const void* buf, uintptr_t size);
     bool initProcess(DWORD pid);
     bool initProcessByName(const std::string& process_name);
@@ -116,33 +116,85 @@ inline bool mem::isX32(HANDLE handle) {
 template <typename T>
 T Read(uintptr_t address);
 inline bool mem::rttiInfo(uintptr_t address, std::string& out) {
-    uintptr_t objectLocatorPtr = Read<uintptr_t>(address - sizeof(void*));
-    if (!objectLocatorPtr) {
+    // Static cache for RTTI results - only look up once per address
+    static std::unordered_map<uintptr_t, std::pair<bool, std::string>> rttiCache;
+
+    // Check cache first
+    auto it = rttiCache.find(address);
+    if (it != rttiCache.end()) {
+        if (it->second.first) {
+            out = it->second.second;
+        }
+        return it->second.first;
+    }
+
+    // Not in cache - do the lookup with blocking reads
+    std::string result;
+
+    uintptr_t objectLocatorPtr = 0;
+    if (!read_blocking(address - sizeof(void*), &objectLocatorPtr, sizeof(uintptr_t)) || !objectLocatorPtr) {
+        rttiCache[address] = { false, "" };
         return false;
     }
 
-    auto objectLocator = Read<RTTICompleteObjectLocator>(objectLocatorPtr);
+    RTTICompleteObjectLocator objectLocator;
+    if (!read_blocking(objectLocatorPtr, &objectLocator, sizeof(RTTICompleteObjectLocator))) {
+        rttiCache[address] = { false, "" };
+        return false;
+    }
+
     auto baseModule = objectLocatorPtr - objectLocator.selfOffset;
 
-    auto hierarchy = Read<RTTIClassHierarchyDescriptor>(baseModule + objectLocator.hierarchyDescriptorOffset);
+    RTTIClassHierarchyDescriptor hierarchy;
+    if (!read_blocking(baseModule + objectLocator.hierarchyDescriptorOffset, &hierarchy, sizeof(RTTIClassHierarchyDescriptor))) {
+        rttiCache[address] = { false, "" };
+        return false;
+    }
+
     uintptr_t classArray = baseModule + hierarchy.pBaseClassArray;
 
+    // REMOVE THE LIMIT - just check it's reasonable (not corrupted memory)
+    if (hierarchy.numBaseClasses == 0 || hierarchy.numBaseClasses > 100) {
+        rttiCache[address] = { false, "" };
+        return false;
+    }
+
     for (DWORD i = 0; i < hierarchy.numBaseClasses; i++) {
-        uintptr_t classDescriptor = baseModule + Read<DWORD>(classArray + i * sizeof(DWORD));
-        DWORD typeDescriptorOffset = Read<DWORD>(classDescriptor);
-        auto typeDescriptor = Read<TypeDescriptor>(baseModule + typeDescriptorOffset);
+        DWORD classDescriptorRVA = 0;
+        if (!read_blocking(classArray + i * sizeof(DWORD), &classDescriptorRVA, sizeof(DWORD))) {
+            continue;
+        }
+
+        uintptr_t classDescriptor = baseModule + classDescriptorRVA;
+
+        DWORD typeDescriptorOffset = 0;
+        if (!read_blocking(classDescriptor, &typeDescriptorOffset, sizeof(DWORD))) {
+            continue;
+        }
+
+        TypeDescriptor typeDescriptor;
+        if (!read_blocking(baseModule + typeDescriptorOffset, &typeDescriptor, sizeof(TypeDescriptor))) {
+            continue;
+        }
 
         std::string name = typeDescriptor.name;
         if (!name.ends_with("@@")) {
-            return false;
+            continue;  // CHANGED: don't return false, just skip this entry
         }
 
         name = name.substr(4);
         name = name.substr(0, name.size() - 2);
 
-        out = out + " : " + name;
+        result = result + " : " + name;
     }
 
+    if (result.empty()) {
+        rttiCache[address] = { false, "" };
+        return false;
+    }
+
+    rttiCache[address] = { true, result };
+    out = result;
     return true;
 }
 
@@ -457,7 +509,12 @@ inline void mem::cleanDeadProcess() {
     g_ExportMap.clear();
     g_pid = 0;
     activeProcess = false;
-    clearCache();
+
+    // Clear memory snapshots
+    {
+        std::lock_guard<std::mutex> lock(g_MemoryMutex);
+        g_MemorySnapshots.clear();
+    }
 }
 
 extern void initClasses(bool);
@@ -581,31 +638,46 @@ inline bool mem::read(uintptr_t address, void* buf, uintptr_t size) {
         return false;
     }
 
-    // Check cache first
+    // Try to use existing data from background thread cache
     {
-        std::lock_guard<std::mutex> lock(g_CacheMutex);
-        auto now = std::chrono::steady_clock::now();
-        auto cache_key = address;
+        std::lock_guard<std::mutex> lock(g_MemoryMutex);
 
-        auto it = g_ReadCache.find(cache_key);
-        if (it != g_ReadCache.end()) {
-            auto age = std::chrono::duration_cast<std::chrono::milliseconds>(now - it->second.second);
-            if (age < CACHE_DURATION && it->second.first.size() >= size) {
-                memcpy(buf, it->second.first.data(), size);
-                return true;
+        // Check if this address is covered by any cached snapshot
+        for (auto& [cached_addr, cached_data] : g_MemorySnapshots) {
+            // Make sure cached_data is valid before accessing
+            if (cached_data.empty()) continue;
+
+            if (address >= cached_addr && address + size <= cached_addr + cached_data.size()) {
+                size_t offset = address - cached_addr;
+
+                // Safety check
+                if (offset + size <= cached_data.size()) {
+                    memcpy(buf, cached_data.data() + offset, size);
+                    return true;
+                }
             }
         }
     }
 
-    std::promise<bool> promise;
-    std::future<bool> future = promise.get_future();
+    // Not in cache - return zeros for now (will be filled next frame)
+    memset(buf, 0, size);
+    return false;
+}
+
+inline bool mem::read_blocking(uintptr_t address, void* buf, uintptr_t size) {
+    if (!g_WebSocketServer.is_connected() || !activeProcess) {
+        return false;
+    }
+
+    auto promise_ptr = std::make_shared<std::promise<std::vector<uint8_t>>>();
+    std::future<std::vector<uint8_t>> future = promise_ptr->get_future();
 
     json data;
-    data["address"] = std::to_string(address);  // String
-    data["size"] = std::to_string(size);        // String
+    data["address"] = std::to_string(address);
+    data["size"] = std::to_string(size);
 
     g_WebSocketServer.send_request("rvm", data,
-        [buf, size, address, &promise](const std::string& response) {
+        [promise_ptr, size](const std::string& response) {
             try {
                 auto j = json::parse(response);
 
@@ -618,27 +690,24 @@ inline bool mem::read(uintptr_t address, void* buf, uintptr_t size) {
                         buffer[i] = (uint8_t)strtoul(byte_str.c_str(), nullptr, 16);
                     }
 
-                    memcpy(buf, buffer.data(), size);
-
-                    {
-                        std::lock_guard<std::mutex> lock(g_CacheMutex);
-                        g_ReadCache[address] = { buffer, std::chrono::steady_clock::now() };
-                    }
-
-                    promise.set_value(true);
+                    promise_ptr->set_value(std::move(buffer));
                 }
                 else {
-                    promise.set_value(false);
+                    promise_ptr->set_value(std::vector<uint8_t>());
                 }
             }
             catch (const std::exception& e) {
                 logger::addLog("[Memory] rvm error: " + std::string(e.what()));
-                promise.set_value(false);
+                promise_ptr->set_value(std::vector<uint8_t>());
             }
         });
 
-    if (future.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready) {
-        return future.get();
+    if (future.wait_for(std::chrono::milliseconds(50)) == std::future_status::ready) {
+        auto result = future.get();
+        if (!result.empty() && result.size() >= size) {
+            memcpy(buf, result.data(), size);
+            return true;
+        }
     }
 
     return false;
@@ -649,10 +718,9 @@ inline bool mem::write(uintptr_t address, const void* buf, uintptr_t size) {
         return false;
     }
 
-    std::promise<bool> promise;
-    std::future<bool> future = promise.get_future();
+    auto promise_ptr = std::make_shared<std::promise<bool>>();
+    std::future<bool> future = promise_ptr->get_future();
 
-    // Convert bytes to hex string
     std::string hex_data;
     const uint8_t* bytes = static_cast<const uint8_t*>(buf);
     for (size_t i = 0; i < size; i++) {
@@ -666,20 +734,20 @@ inline bool mem::write(uintptr_t address, const void* buf, uintptr_t size) {
     data["data"] = hex_data;
 
     g_WebSocketServer.send_request("wvm", data,
-        [&promise](const std::string& response) {
+        [promise_ptr](const std::string& response) {
             try {
                 auto j = json::parse(response);
 
                 if (j.contains("success") && j["success"].get<bool>()) {
-                    promise.set_value(true);
+                    promise_ptr->set_value(true);
                 }
                 else {
-                    promise.set_value(false);
+                    promise_ptr->set_value(false);
                 }
             }
             catch (const std::exception& e) {
                 logger::addLog("[Memory] wvm error: " + std::string(e.what()));
-                promise.set_value(false);
+                promise_ptr->set_value(false);
             }
         });
 
@@ -732,11 +800,6 @@ inline uintptr_t mem::findPattern(uintptr_t start, uintptr_t size, const std::st
 
     logger::addLog("[Memory] Pattern scan timeout");
     return 0;
-}
-
-inline void mem::clearCache() {
-    std::lock_guard<std::mutex> lock(g_CacheMutex);
-    g_ReadCache.clear();
 }
 
 template <typename T>

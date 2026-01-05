@@ -1,9 +1,7 @@
 #include <websocket_server.h>
-
 #include <Windows.h>
 #include <iostream>
 #include <string>
-
 #include <directx.h>
 #include <memory.h>
 #include <parser.h>
@@ -21,16 +19,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         return 1;
     }
 
-
     ShowWindow(hwnd, SW_HIDE);
     UpdateWindow(hwnd);
-
     ui::init(hwnd);
-
     g_WebSocketServer.start();
+
+    // Start memory reading thread
+    g_MemoryThreadRunning = true;
+    g_MemoryReadThread = std::thread(MemoryReadThreadFunc);
 
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
+
     while (msg.message != WM_QUIT && ui::open) {
         if (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg);
@@ -38,10 +38,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             continue;
         }
 
-        // Cleanup stale requests
         g_WebSocketServer.cleanup_stale_requests();
 
-        // Check if we need to refresh modules (after process attach completes)
         if (mem::g_NeedsModuleRefresh) {
             mem::g_NeedsModuleRefresh = false;
             mem::getModules();
@@ -58,11 +56,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
         g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clear_color);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
-
         g_pSwapChain->Present(1, 0);
+    }
+
+    // Stop memory reading thread
+    g_MemoryThreadRunning = false;
+    if (g_MemoryReadThread.joinable()) {
+        g_MemoryReadThread.join();
     }
 
     g_WebSocketServer.stop();
@@ -74,5 +76,5 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     DestroyWindow(hwnd);
     UnregisterClass(wc.lpszClassName, hInstance);
 
-	return 0;
+    return 0;
 }

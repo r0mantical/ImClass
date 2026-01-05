@@ -1,9 +1,15 @@
 #pragma once
 
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <unordered_set>
 
 inline std::chrono::steady_clock::time_point g_LastClassUpdate = std::chrono::steady_clock::now();
-inline constexpr std::chrono::milliseconds CLASS_UPDATE_INTERVAL{ 100 };
+inline constexpr std::chrono::milliseconds CLASS_UPDATE_INTERVAL{ 16 };
+
+inline std::thread g_MemoryReadThread;
+inline std::atomic<bool> g_MemoryThreadRunning{ false };
 
 namespace ui {
 	extern std::string toHexString(uintptr_t address, int width);
@@ -146,6 +152,8 @@ public:
 
 inline int g_nameCounter = 0;
 
+
+
 class uClass {
 public:
 	char name[64];
@@ -234,6 +242,72 @@ public:
 
 inline uClass g_PreviewClass(15);
 inline std::vector<uClass> g_Classes = { uClass(50) };
+
+
+inline void MemoryReadThreadFunc() {
+	while (g_MemoryThreadRunning) {
+		auto now = std::chrono::steady_clock::now();
+
+		if (mem::activeProcess) {
+			// Collect all addresses that need reading
+			std::vector<std::pair<uintptr_t, size_t>> read_requests;
+
+			for (auto& uClass : g_Classes) {
+				if (uClass.address != 0 && uClass.size > 0) {
+					read_requests.push_back({ uClass.address, uClass.size });
+					logger::addLog("[MemThread] Class addr: 0x" + std::to_string(uClass.address) + " size: " + std::to_string(uClass.size));
+				}
+			}
+
+			// Add preview class if it has an address
+			if (g_PreviewClass.address != 0 && g_PreviewClass.size > 0) {
+				read_requests.push_back({ g_PreviewClass.address, g_PreviewClass.size });
+			}
+
+			logger::addLog("[MemThread] Reading " + std::to_string(read_requests.size()) + " classes");
+
+			// Clear old snapshots that are no longer needed
+			{
+				std::lock_guard<std::mutex> lock(mem::g_MemoryMutex);
+				std::unordered_set<uintptr_t> active_addresses;
+				for (auto& [addr, size] : read_requests) {
+					active_addresses.insert(addr);
+				}
+
+				// Remove stale entries
+				for (auto it = mem::g_MemorySnapshots.begin(); it != mem::g_MemorySnapshots.end();) {
+					if (active_addresses.find(it->first) == active_addresses.end()) {
+						logger::addLog("[MemThread] Removing stale cache for: 0x" + std::to_string(it->first));
+						it = mem::g_MemorySnapshots.erase(it);
+					}
+					else {
+						++it;
+					}
+				}
+			}
+
+			// Read memory for all classes - USE BLOCKING READ
+			for (auto& [addr, size] : read_requests) {
+				std::vector<uint8_t> buffer(size);
+				if (mem::read_blocking(addr, buffer.data(), size)) {
+					std::lock_guard<std::mutex> lock(mem::g_MemoryMutex);
+					mem::g_MemorySnapshots[addr] = std::move(buffer);
+					logger::addLog("[MemThread] Updated cache for: 0x" + std::to_string(addr) + " (" + std::to_string(size) + " bytes)");
+				}
+				else {
+					logger::addLog("[MemThread] FAILED to read: 0x" + std::to_string(addr));
+				}
+			}
+		}
+
+		g_LastClassUpdate = now;
+
+		// Sleep for the update interval
+		std::this_thread::sleep_for(CLASS_UPDATE_INTERVAL);
+	}
+
+	logger::addLog("[MemThread] Thread stopped");
+}
 
 inline void uClass::normalizeNodes() {
 	std::vector<nodeBase> newNodes;
@@ -1191,12 +1265,23 @@ inline void uClass::recalculateHeights() {
 }
 
 inline void uClass::drawNodes() {
-	auto now = std::chrono::steady_clock::now();
-	bool should_update = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_LastClassUpdate) >= CLASS_UPDATE_INTERVAL;
+	// Copy memory snapshot from background thread
+	bool foundCache = false;
+	{
+		std::lock_guard<std::mutex> lock(mem::g_MemoryMutex);
+		auto it = mem::g_MemorySnapshots.find(this->address);
+		if (it != mem::g_MemorySnapshots.end() && it->second.size() == this->size) {
+			memcpy(this->data, it->second.data(), this->size);
+			foundCache = true;
+		}
+	}
 
-	if (should_update) {
-		mem::read(this->address, this->data, this->size);
-		g_LastClassUpdate = now;
+	// ADD THIS - log once every 60 frames
+	static int frameCounter = 0;
+	if (frameCounter++ % 60 == 0) {
+		logger::addLog("[DrawNodes] Cache " + std::string(foundCache ? "FOUND" : "NOT FOUND") +
+			" for 0x" + std::to_string(this->address) +
+			" size: " + std::to_string(this->size));
 	}
 
 	ImVec2 parentSize = ImGui::GetContentRegionAvail();
