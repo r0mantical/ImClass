@@ -1,3 +1,5 @@
+#include <websocket_server.h>
+
 #include <Windows.h>
 #include <iostream>
 #include <string>
@@ -9,9 +11,9 @@
 #include <ui.h>
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
-    WNDCLASS wc = { CS_CLASSDC, WndProc, 0, 0, hInstance, nullptr, nullptr, nullptr, nullptr, L"ImClassWnd" };
+    WNDCLASS wc = { CS_CLASSDC, WndProc, 0, 0, hInstance, nullptr, nullptr, nullptr, nullptr, L"PCXClassWnd" };
     RegisterClass(&wc);
-    HWND hwnd = CreateWindow(wc.lpszClassName, L"ImClass", WS_OVERLAPPEDWINDOW, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
+    HWND hwnd = CreateWindow(wc.lpszClassName, L"PCXClass", WS_OVERLAPPEDWINDOW, 0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
 
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();
@@ -19,10 +21,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
         return 1;
     }
 
+
     ShowWindow(hwnd, SW_HIDE);
     UpdateWindow(hwnd);
 
     ui::init(hwnd);
+
+    g_WebSocketServer.start();
 
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
@@ -31,6 +36,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
             continue;
+        }
+
+        // Cleanup stale requests
+        g_WebSocketServer.cleanup_stale_requests();
+
+        // Check if we need to refresh modules (after process attach completes)
+        if (mem::g_NeedsModuleRefresh) {
+            mem::g_NeedsModuleRefresh = false;
+            mem::getModules();
         }
 
         ImGui_ImplDX11_NewFrame();
@@ -50,6 +64,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
 
         g_pSwapChain->Present(1, 0);
     }
+
+    g_WebSocketServer.stop();
 
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

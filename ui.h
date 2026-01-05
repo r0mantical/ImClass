@@ -9,6 +9,7 @@
 #include <imgui/imgui_internal.h>
 
 #include "patterns.h"
+#include <logging.h>
 
 namespace ui {
     bool open = true;
@@ -17,22 +18,25 @@ namespace ui {
     bool stringSearchWindow = false;
     bool sigScanWindow = false;
     bool exportWindow = false;
+    bool consoleWindow = true;  // Console visible by default
+    bool moduleListWindow = false;
+
     std::string exportedClass;
     inline std::optional<PatternScanResult> patternResults;
     char addressInput[256] = "0";
-	char module[512] = { 0 };
-	char signature[512] = { 0 };
+    char module[512] = { 0 };
+    char signature[512] = { 0 };
     char searchString[512] = { 0 };
 
     ImVec2 mainPos;
-    ImVec2 signaturePos = {0, 0};
+    ImVec2 signaturePos = { 0, 0 };
     ImVec2 stringSearchPos = { 0, 0 };
 
     void init(HWND hwnd);
-	void renderProcessWindow();
-	void renderMain();
+    void renderProcessWindow();
+    void renderMain();
     void renderExportWindow();
-	void render();
+    void render();
     bool searchMatches(std::string str, std::string term);
     uintptr_t toAddress(std::string address);
     std::string toHexString(uintptr_t address, int width = 0);
@@ -40,10 +44,12 @@ namespace ui {
     void updateAddress(uintptr_t newAddress, uintptr_t* dest = 0);
     void renderSignatureResults();
     void renderSignatureScan();
-	void renderStringScan();
+    void renderStringScan();
     void updateAddressBox(char* dest, char* src);
     void cleanDeadProcess();
     void renderModals();
+    void renderConsoleWindow();
+    void renderModuleListWindow();
 }
 
 // reused for small tool windows
@@ -61,29 +67,29 @@ void ui::cleanDeadProcess()
 {
     mem::cleanDeadProcess();
 
-	for (auto &cClass : g_Classes)
-	{
+    for (auto& cClass : g_Classes)
+    {
         memset(cClass.data, 0, cClass.size);
-	}
+    }
 }
 
 
 inline void ui::renderSignatureScan()
 {
-	static bool oSigScanWindow = false;
-	if (!sigScanWindow) {
-		oSigScanWindow = sigScanWindow;
-		return;
-	}
+    static bool oSigScanWindow = false;
+    if (!sigScanWindow) {
+        oSigScanWindow = sigScanWindow;
+        return;
+    }
 
-	const float entryHeight = ImGui::GetTextLineHeightWithSpacing();
+    const float entryHeight = ImGui::GetTextLineHeightWithSpacing();
 
-	constexpr int numElements = 3;
-	const float contentHeight = (entryHeight * numElements) + padding;
-	const float windowHeight = min(headerHeight + contentHeight + footerHeight, 300.0f);
+    constexpr int numElements = 3;
+    const float contentHeight = (entryHeight * numElements) + padding;
+    const float windowHeight = min(headerHeight + contentHeight + footerHeight, 300.0f);
     static bool hasSetPos = false;
 
-	if (sigScanWindow != oSigScanWindow) {
+    if (sigScanWindow != oSigScanWindow) {
         if (hasSetPos) {
             ImGui::SetNextWindowPos(signaturePos, ImGuiCond_Always);
         }
@@ -91,33 +97,42 @@ inline void ui::renderSignatureScan()
         {
             ImVec2 defaultPos = ImVec2(mainPos.x + 50, mainPos.y + 50);
             ImGui::SetNextWindowPos(defaultPos, ImGuiCond_Always);
-			signaturePos = ImVec2(defaultPos);
+            signaturePos = ImVec2(defaultPos);
             hasSetPos = true;
         }
-		ImGui::SetNextWindowSize(ImVec2(minWidth, windowHeight), ImGuiCond_Always);
-	}
-	oSigScanWindow = sigScanWindow;
+        ImGui::SetNextWindowSize(ImVec2(minWidth, windowHeight), ImGuiCond_Always);
+    }
+    oSigScanWindow = sigScanWindow;
 
-	ImGui::Begin("Signature Scanner", &sigScanWindow);
-	ImGui::InputText("Module", module, sizeof(module));
-	ImGui::InputText("Signature", signature, sizeof(signature));
-	if (ImGui::Button("Scan")) {
-		PatternInfo pattern;
-		pattern.pattern = signature;
-		patternResults = pattern::scanPattern(pattern, module);
-		if (patternResults != std::nullopt && !patternResults.value().matches.empty()) {
-			signaturesWindow = true;
-		};
-		sigScanWindow = false;
-	}
-	ImGui::SameLine();
-	if (ImGui::Button("Cancel")) {
-		sigScanWindow = false;
-	}
+    ImGui::Begin("Nigga Scan", &sigScanWindow);
+    ImGui::InputText("Module", module, sizeof(module));
+    ImGui::InputText("Signature", signature, sizeof(signature));
+    if (ImGui::Button("Scan")) {
+        logger::addLog("[Signature] Scanning for: " + std::string(signature));
+        logger::addLog("[Signature] In module: " + std::string(module));
+
+        PatternInfo pattern;
+        pattern.pattern = signature;
+        patternResults = pattern::scanPattern(pattern, module);
+
+        if (patternResults.has_value() && !patternResults.value().matches.empty()) {
+            logger::addLog("[Signature] Found " + std::to_string(patternResults.value().matches.size()) + " matches");
+            signaturesWindow = true;
+        }
+        else {
+            logger::addLog("[Signature] No matches found");
+        }
+
+        sigScanWindow = false;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        sigScanWindow = false;
+    }
 
     signaturePos = ImGui::GetWindowPos();
 
-	ImGui::End();
+    ImGui::End();
 }
 
 inline void ui::renderStringScan()
@@ -150,18 +165,31 @@ inline void ui::renderStringScan()
     }
     oStringSearchWindow = stringSearchWindow;
 
-    ImGui::Begin("String Scanner", &stringSearchWindow);
+    ImGui::Begin("Stwing Scan", &stringSearchWindow);
     ImGui::InputText("Module", module, sizeof(module));
     ImGui::InputText("String", searchString, sizeof(searchString));
     if (ImGui::Button("Scan")) {
+        logger::addLog("[String] Scanning for: " + std::string(searchString));
+        logger::addLog("[String] In module: " + std::string(module));
+
         PatternInfo pattern;
-		std::string patternString = pattern::stringToSignature(searchString);
+        std::string patternString = pattern::stringToSignature(searchString);
+
+        logger::addLog("[String] Converted to pattern: " + patternString);
 
         pattern.pattern = patternString;
-        patternResults = pattern::scanPattern(pattern, module, PatternType::BYTE_PATTERN);
-        if (patternResults != std::nullopt && !patternResults.value().matches.empty()) {
+        pattern.type = PatternType::BYTE_PATTERN;
+
+        patternResults = pattern::scanPattern(pattern, module, std::nullopt);
+
+        if (patternResults.has_value() && !patternResults.value().matches.empty()) {
+            logger::addLog("[String] Found " + std::to_string(patternResults.value().matches.size()) + " matches");
             signaturesWindow = true;
         }
+        else {
+            logger::addLog("[String] No matches found");
+        }
+
         stringSearchWindow = false;
     }
     ImGui::SameLine();
@@ -176,41 +204,41 @@ inline void ui::renderStringScan()
 
 
 void ui::renderSignatureResults() {
-	static bool oSignaturesWindow = false;
-	if (!signaturesWindow) {
-		oSignaturesWindow = signaturesWindow;
-		return;
-	}
+    static bool oSignaturesWindow = false;
+    if (!signaturesWindow) {
+        oSignaturesWindow = signaturesWindow;
+        return;
+    }
 
-	const float entryHeight = ImGui::GetTextLineHeightWithSpacing();
-	constexpr float headerHeight = 30.0f;
-	constexpr float footerHeight = 30.0f;
-	constexpr float minWidth = 200.0f;
+    const float entryHeight = ImGui::GetTextLineHeightWithSpacing();
+    constexpr float headerHeight = 30.0f;
+    constexpr float footerHeight = 30.0f;
+    constexpr float minWidth = 200.0f;
 
-	const size_t numEntries = patternResults.has_value() && !patternResults.value().matches.empty()
-		? patternResults.value().matches.size()
-		: 1;
+    const size_t numEntries = patternResults.has_value() && !patternResults.value().matches.empty()
+        ? patternResults.value().matches.size()
+        : 1;
 
-	const float windowHeight = min(headerHeight + (entryHeight * numEntries) + footerHeight, 500.0f);
+    const float windowHeight = min(headerHeight + (entryHeight * numEntries) + footerHeight, 500.0f);
 
-	if (signaturesWindow != oSignaturesWindow) {
+    if (signaturesWindow != oSignaturesWindow) {
         ImGui::SetNextWindowPos(signaturePos, ImGuiCond_Always);
-		ImGui::SetNextWindowSize(ImVec2(minWidth, windowHeight), ImGuiCond_Always);
-	}
-	oSignaturesWindow = signaturesWindow;
+        ImGui::SetNextWindowSize(ImVec2(minWidth, windowHeight), ImGuiCond_Always);
+    }
+    oSignaturesWindow = signaturesWindow;
 
-	ImGui::Begin("Signatures", &signaturesWindow);
-	const ImVec2 wndSize = ImGui::GetWindowSize();
-	ImGui::BeginChild("##SignaturesList", ImVec2(0, wndSize.y - 30));
+    ImGui::Begin("Signatures", &signaturesWindow);
+    const ImVec2 wndSize = ImGui::GetWindowSize();
+    ImGui::BeginChild("##SignaturesList", ImVec2(0, wndSize.y - 30));
 
-	if (patternResults.has_value() && !patternResults.value().matches.empty()) {
+    if (patternResults.has_value() && !patternResults.value().matches.empty()) {
 
         PatternScanResult& results = patternResults.value();
 
-		for (uintptr_t match : results.matches) {
-			const std::string address = toHexString(match);
+        for (uintptr_t match : results.matches) {
+            const std::string address = toHexString(match);
             const char* cAddr = address.c_str();
-			if (ImGui::Selectable(cAddr)) {
+            if (ImGui::Selectable(cAddr)) {
                 if (g_Classes.size() >= g_SelectedClass) {
                     uClass& cClass = g_Classes[g_SelectedClass];
                     updateAddressBox(addressInput, (char*)(cAddr));
@@ -218,15 +246,15 @@ void ui::renderSignatureResults() {
                     updateAddress(match, &cClass.address);
                     signaturesWindow = false;
                 }
-			}
-		}
-	}
-	else {
-		ImGui::Text("No signatures found.");
-	}
+            }
+        }
+    }
+    else {
+        ImGui::Text("No signatures found.");
+    }
 
-	ImGui::EndChild();
-	ImGui::End();
+    ImGui::EndChild();
+    ImGui::End();
 }
 
 void ui::updateAddress(uintptr_t newAddress, uintptr_t* dest) {
@@ -239,18 +267,18 @@ void ui::updateAddress(uintptr_t newAddress, uintptr_t* dest) {
 
 void ui::renderModals()
 {
-	if (showModuleMissingPopup) {
-		ImGui::OpenPopup("Module Missing");
-		showModuleMissingPopup = false;
-	}
+    if (showModuleMissingPopup) {
+        ImGui::OpenPopup("Module Missing");
+        showModuleMissingPopup = false;
+    }
 
-	if (ImGui::BeginPopup("Module Missing"))
-	{
-		ImGui::Text("The selected address is not inside a module!");
-		if (ImGui::Button("Close"))
-			ImGui::CloseCurrentPopup();
-		ImGui::EndPopup();
-	}
+    if (ImGui::BeginPopup("Module Missing"))
+    {
+        ImGui::Text("The selected address is not inside a module!");
+        if (ImGui::Button("Close"))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 }
 
 void ui::renderMain() {
@@ -269,13 +297,57 @@ void ui::renderMain() {
             {
                 sigScanWindow = true;
             }
-			if (ImGui::MenuItem("String Scanner"))
-			{
-				stringSearchWindow = true;
-			}
-
+            if (ImGui::MenuItem("String Scanner"))
+            {
+                stringSearchWindow = true;
+            }
+            if (ImGui::MenuItem("Module List"))
+            {
+                moduleListWindow = true;
+            }
             ImGui::EndMenu();
         }
+
+        if (ImGui::BeginMenu("View")) {
+            if (ImGui::MenuItem("Console", nullptr, consoleWindow)) {
+                consoleWindow = !consoleWindow;
+            }
+            ImGui::EndMenu();
+        }
+
+        // Show attached process
+        if (mem::activeProcess && mem::g_pid != 0) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.8f, 1.0f, 1.0f));
+
+            // Find process name from process list
+            std::string processName = "Unknown";
+            for (const auto& proc : mem::processes) {
+                if (proc.pid == mem::g_pid) {
+                    std::wstring wname = proc.name;
+                    processName = std::string(wname.begin(), wname.end());
+                    break;
+                }
+            }
+
+            ImGui::Text("Process: %s (PID %d)", processName.c_str(), mem::g_pid);
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            ImGui::Text("|");
+            ImGui::SameLine();
+        }
+
+        // Show perception connection status
+        if (g_WebSocketServer.is_connected()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
+            ImGui::Text("perception.cx connected");
+            ImGui::PopStyleColor();
+        }
+        else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.5f, 0.0f, 1.0f));
+            ImGui::Text("waiting for perception.cx");
+            ImGui::PopStyleColor();
+        }
+
         ImGui::EndMenuBar();
 
         ImGui::Columns(2);
@@ -289,7 +361,7 @@ void ui::renderMain() {
         ImGui::BeginChild("ClassesChild", ImVec2(columnOffset - 15, wndSize.y - 54), 1, ImGuiWindowFlags_NoScrollbar);
 
         static char renameBuf[64] = { 0 };
-		static int renamedClass = -1;
+        static int renamedClass = -1;
 
         for (int i = 0; i < g_Classes.size(); i++) {
             auto& lClass = g_Classes[i];
@@ -384,7 +456,7 @@ void ui::renderMain() {
 
         oInputFocused = inputFocused;
 
-        ImGui::BeginChild("MemView", ImVec2(0, 0), 0, g_HoveringPointer? ImGuiWindowFlags_NoScrollWithMouse : 0);
+        ImGui::BeginChild("MemView", ImVec2(0, 0), 0, g_HoveringPointer ? ImGuiWindowFlags_NoScrollWithMouse : 0);
         g_HoveringPointer = false;
         g_InPopup = false;
         //auto buf = Read<readBuf<4096>>(sClass.address);
@@ -393,7 +465,7 @@ void ui::renderMain() {
 
         ImGui::EndChild();
 
-		bool processActive = mem::isProcessAlive() && mem::activeProcess;
+        bool processActive = mem::isProcessAlive() && mem::activeProcess;
         static bool processWasActive = false;
 
         if (processWasActive && !processActive)
@@ -407,12 +479,10 @@ void ui::renderMain() {
 
 void ui::renderProcessWindow() {
     static bool oProcessWindow = false;
-
     if (!processWindow) {
         oProcessWindow = processWindow;
         return;
     }
-
     if (processWindow != oProcessWindow) {
         ImGui::SetNextWindowPos(ImVec2(mainPos.x + 50, mainPos.y + 50), ImGuiCond_Always);
     }
@@ -420,28 +490,26 @@ void ui::renderProcessWindow() {
 
     ImGui::Begin("Attach to process", &processWindow);
 
-    static DWORD selected = 0;
-    static char searchTerm[64] = { 0 };
-    ImGui::InputText("Search", searchTerm, sizeof(searchTerm));
+    static char processNameInput[256] = { 0 };
 
-    ImVec2 wndSize = ImGui::GetWindowSize();
-    ImGui::BeginChild("##ProcessList", ImVec2(0, wndSize.y - 81));
-    for (int i = 0; i < mem::processes.size(); i++) {
-        auto& proc = mem::processes[i];
-        std::string procName = std::string(proc.name.begin(), proc.name.end());
-        if (searchTerm[0] != 0 && !searchMatches(procName, searchTerm)) {
-            continue;
-        }
+    ImGui::Text("Process Name:");
+    ImGui::InputTextWithHint("##ProcessName", "e.g. notepad.exe", processNameInput, sizeof(processNameInput));
 
-        if (ImGui::Selectable((procName + " " + std::to_string(proc.pid)).c_str(), (proc.pid == selected))) {
-            selected = proc.pid;
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (ImGui::Button("Attach", ImVec2(120, 0))) {
+        if (strlen(processNameInput) > 0) {
+            processWindow = false;
+            mem::initProcessByName(processNameInput);
         }
     }
-    ImGui::EndChild();
 
-    if (ImGui::Button("Confirm")) {
+    ImGui::SameLine();
+
+    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
         processWindow = false;
-        mem::initProcess(selected);
     }
 
     ImGui::End();
@@ -461,6 +529,89 @@ void ui::renderExportWindow() {
     ImGui::End();
 }
 
+void ui::renderConsoleWindow() {
+    if (!consoleWindow) return;
+
+    ImGui::Begin("Console >.<", &consoleWindow);
+
+    // Add clear button at the top
+    if (ImGui::Button("Clear Logs")) {
+        logger::clearLogs();
+    }
+
+    ImGui::Separator();
+
+    // Iterate through the log entries
+    for (const auto& entry : logger::getLogs()) {
+        ImGui::PushID(&entry);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+        ImGui::Text("[%s]", entry.timestamp.c_str());
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        if (ImGui::Selectable(entry.message.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)) {
+            std::string fullLog = "[" + entry.timestamp + "] " + entry.message;
+            ImGui::SetClipboardText(fullLog.c_str());
+        }
+        ImGui::Separator();
+        ImGui::PopID();
+    }
+    ImGui::End();
+}
+
+void ui::renderModuleListWindow() {
+    if (!moduleListWindow) return;
+
+    ImGui::Begin("Epstein's List", &moduleListWindow);
+
+    if (ImGui::Button("Refresh Modules")) {
+        mem::getModules();
+    }
+
+    ImGui::Separator();
+
+    ImGui::Text("Total Modules: %zu", mem::moduleList.size());
+
+    ImGui::Separator();
+
+    ImGui::BeginChild("ModuleListChild");
+
+    if (ImGui::BeginTable("ModulesTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Base Address", ImGuiTableColumnFlags_WidthFixed, 150.0f);
+        ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+        ImGui::TableHeadersRow();
+
+        for (const auto& mod : mem::moduleList) {
+            ImGui::TableNextRow();
+
+            ImGui::TableNextColumn();
+            if (ImGui::Selectable(mod.name.c_str(), false, ImGuiSelectableFlags_SpanAllColumns)) {
+                // Copy module name to clipboard
+                ImGui::SetClipboardText(mod.name.c_str());
+            }
+
+            ImGui::TableNextColumn();
+            std::string baseStr = toHexString(mod.base, 16);
+            ImGui::Text("0x%s", baseStr.c_str());
+            if (ImGui::IsItemClicked()) {
+                ImGui::SetClipboardText(baseStr.c_str());
+            }
+
+            ImGui::TableNextColumn();
+            std::string sizeStr = toHexString(mod.size, 8);
+            ImGui::Text("0x%s", sizeStr.c_str());
+            if (ImGui::IsItemClicked()) {
+                ImGui::SetClipboardText(sizeStr.c_str());
+            }
+        }
+
+        ImGui::EndTable();
+    }
+
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 bool ui::searchMatches(std::string str, std::string term) {
     std::transform(str.begin(), str.end(), str.begin(), tolower);
     std::transform(term.begin(), term.end(), term.begin(), tolower);
@@ -472,9 +623,11 @@ void ui::render() {
     renderProcessWindow();
     renderExportWindow();
     renderSignatureScan();
-    renderSignatureResults();    
-	renderStringScan();
-	renderModals();
+    renderSignatureResults();
+    renderStringScan();
+    renderModals();
+    renderConsoleWindow();
+    renderModuleListWindow();
 }
 
 void ui::init(HWND hwnd) {

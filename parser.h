@@ -1,5 +1,4 @@
 #pragma once
-
 #include <list>
 #include <string>
 #include <vector>
@@ -23,28 +22,23 @@ inline std::list<std::string> g_fileEndings = {
 inline uintptr_t addressParser::parseExport(const std::string& expression)
 {
 	size_t delimPos = expression.find('!');
-
 	if (delimPos != std::string::npos) {
 		std::string moduleName = expression.substr(0, delimPos);
 		std::string exportName = expression.substr(delimPos + 1);
-
 		return mem::getExport(moduleName, exportName);
 	}
-
 	return 0;
 }
 
 inline uintptr_t addressParser::parseInput(const char* str) {
 	std::string expression(str);
 	uintptr_t rtn = 0;
-
 	std::vector<std::string> tokens;
 	std::vector<char> operators;
 
 	{ // separating scope to avoid confusion with token naming
 		size_t lastPos = 0;
 		std::string token;
-
 		for (size_t pos = 0; pos < expression.length(); pos++)
 		{
 			char posToken = expression[pos];
@@ -56,18 +50,15 @@ inline uintptr_t addressParser::parseInput(const char* str) {
 				lastPos = pos + 1;
 			}
 		}
-
 		token = expression.substr(lastPos);
 		tokens.push_back(token);
 	}
 
 	size_t iterator = 0;
-
 	for (std::string& curToken : tokens) {
 		size_t startPos = curToken.find_first_not_of(' ');
 		if (startPos != std::string::npos) {
 			curToken.erase(0, startPos);
-
 			size_t endPos = curToken.find_last_not_of(' ');
 			while (endPos + 1 < curToken.length()) {
 				curToken.pop_back();
@@ -78,21 +69,23 @@ inline uintptr_t addressParser::parseInput(const char* str) {
 		}
 
 		uintptr_t value = 0;
+
 		if (curToken.find('!') != std::string::npos) {
 			value = parseExport(curToken);
 		}
 		else {
 			bool isModule = false;
-
 			for (const std::string& ending : g_fileEndings) {
 				if (curToken.find(ending) != std::string::npos) {
-					std::wstring token(curToken.begin(), curToken.end());
-					moduleInfo info;
-					if (mem::getModuleInfo(mem::g_pid, token.c_str(), &info)) {
-						value = info.base;
-						isModule = true;
+					// Use cached module list instead of getModuleInfo
+					for (const auto& mod : mem::moduleList) {
+						if (mod.name == curToken) {
+							value = mod.base;
+							isModule = true;
+							break;
+						}
 					}
-					break; // break out of file endings loop, continue in main
+					break; // break out of file endings loop
 				}
 			}
 
@@ -118,8 +111,6 @@ inline uintptr_t addressParser::parseInput(const char* str) {
 			}
 		}
 		iterator++;
-
 	}
-
 	return rtn;
 }

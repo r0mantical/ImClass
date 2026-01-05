@@ -219,31 +219,69 @@ inline std::optional<PatternScanResult> pattern::scanPattern(PatternInfo& patter
 		}
 	}
 
-	std::wstring wideName(dllName.begin(), dllName.end()); // windows api requires widestring, maybe change input type?
-	DWORD pid = mem::g_pid;
-
-	if (!pid)
+	if (!mem::g_pid)
 		return std::nullopt;
 
-	moduleInfo moduleData;
-	if (!mem::getModuleInfo(pid, wideName.c_str(), &moduleData))
-	{
-		return std::nullopt; // TODO: add failure reasons to the ui such as not finding the module
+	// Find module in cached list instead of calling getModuleInfo
+	moduleInfo* moduleData = nullptr;
+	for (auto& mod : mem::moduleList) {
+		if (mod.name == dllName) {
+			moduleData = &mod;
+			break;
+		}
 	}
 
-	std::vector<uint8_t> patternBytes;
-	std::string mask;
-
-	if (!patternToMask(patternInfo, patternBytes, mask)) {
+	if (!moduleData) {
+		logger::addLog("[Pattern] Module not found in cache: " + dllName);
 		return std::nullopt;
 	}
 
-	auto result = findBytePattern(
-		moduleData.base,
-		moduleData.size,
-		patternBytes.data(),
-		mask.c_str()
-	);
+	// Convert pattern to IDA signature format for Perception
+	std::string ida_pattern;
 
-	return result;
+	if (patternInfo.type == PatternType::IDA_SIGNATURE) {
+		// Already in IDA format
+		ida_pattern = patternInfo.pattern;
+	}
+	else if (patternInfo.type == PatternType::BYTE_PATTERN) {
+		// Convert byte pattern to IDA format
+		std::vector<uint8_t> patternBytes;
+		std::string mask;
+
+		if (!patternToMask(patternInfo, patternBytes, mask)) {
+			return std::nullopt;
+		}
+
+		// Build IDA signature: "48 8B ?? ??" etc
+		for (size_t i = 0; i < patternBytes.size(); i++) {
+			if (i > 0) ida_pattern += " ";
+
+			if (mask[i] == '?') {
+				ida_pattern += "??";
+			}
+			else {
+				char hex[3];
+				sprintf_s(hex, "%02X", patternBytes[i]);
+				ida_pattern += hex;
+			}
+		}
+	}
+	else {
+		return std::nullopt;
+	}
+
+	logger::addLog("[Pattern] Scanning in " + dllName + " for: " + ida_pattern);
+
+	// Use remote pattern scanner via WebSocket
+	uintptr_t result = mem::findPattern(moduleData->base, moduleData->size, ida_pattern);
+
+	if (result != 0) {
+		PatternScanResult scanResult;
+		scanResult.matches.push_back(result);
+		logger::addLog("[Pattern] Found at: 0x" + ui::toHexString(result, 16));
+		return scanResult;
+	}
+
+	logger::addLog("[Pattern] Not found");
+	return std::nullopt;
 }

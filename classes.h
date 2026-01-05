@@ -2,6 +2,9 @@
 
 #include <vector>
 
+inline std::chrono::steady_clock::time_point g_LastClassUpdate = std::chrono::steady_clock::now();
+inline constexpr std::chrono::milliseconds CLASS_UPDATE_INTERVAL{ 100 };
+
 namespace ui {
 	extern std::string toHexString(uintptr_t address, int width);
 }
@@ -27,10 +30,16 @@ enum nodeType {
 	node_vector4,
 	node_vector3,
 	node_vector2,
+	node_vector4d,
+	node_vector3d,
+	node_vector2d,
 	node_matrix4x4,
 	node_matrix3x4,
 	node_matrix3x3,
 	node_bool,
+	node_utf8,
+	node_utf16,
+	node_utf32,
 	node_max
 };
 
@@ -44,6 +53,18 @@ struct Vector3 {
 
 struct Vector2 {
 	float x, y;
+};
+
+struct Vector4d {
+	double x, y, z, w;
+};
+
+struct Vector3d {
+	double x, y, z;
+};
+
+struct Vector2d {
+	double x, y;
 };
 
 struct Matrix4x4 {
@@ -84,10 +105,16 @@ inline nodeTypeInfo nodeData[] = {
 	{node_vector4, sizeof(Vector4), "Vector4", ImColor(115, 255, 124), "Vector4"},
 	{node_vector3, sizeof(Vector3), "Vector3", ImColor(115, 255, 124), "Vector3"},
 	{node_vector2, sizeof(Vector2), "Vector2", ImColor(115, 255, 124), "Vector2"},
+	{node_vector4d, sizeof(Vector4d), "Vector4d", ImColor(95, 235, 104), "Vector4d"},
+	{node_vector3d, sizeof(Vector3d), "Vector3d", ImColor(95, 235, 104), "Vector3d"},
+	{node_vector2d, sizeof(Vector2d), "Vector2d", ImColor(95, 235, 104), "Vector2d"},
 	{node_matrix4x4, sizeof(Matrix4x4), "Matrix4x4", ImColor(3, 252, 144), "matrix4x4_t"},
 	{node_matrix3x4, sizeof(Matrix3x4), "Matrix3x4", ImColor(3, 252, 144), "matrix3x4_t"},
 	{node_matrix3x3, sizeof(Matrix3x3), "Matrix3x3", ImColor(3, 252, 144), "matrix3x3_t"},
-	{node_bool, sizeof(bool), "Bool", ImColor(0, 183, 255), "bool"}
+	{node_bool, sizeof(bool), "Bool", ImColor(0, 183, 255), "bool"},
+	{node_utf8, 64, "UTF8", ImColor(252, 186, 3), "char[]"},
+	{node_utf16, 64, "UTF16", ImColor(252, 186, 3), "wchar_t[]"},
+	{node_utf32, 64, "UTF32", ImColor(252, 186, 3), "char32_t[]"}
 };
 
 inline bool g_HoveringPointer = false;
@@ -100,8 +127,10 @@ public:
 	nodeType type;
 	uint8_t size;
 	bool selected = false;
+	int absoluteOffset = -1;
+	bool isLocked = false;
 
-	nodeBase(const char* aName, nodeType aType, bool aSelected = false) {
+	nodeBase(const char* aName, nodeType aType, bool aSelected = false, int offset = -1) {
 		memset(name, 0, sizeof(name));
 		if (aName) {
 			memcpy(name, aName, sizeof(name));
@@ -110,6 +139,8 @@ public:
 		type = aType;
 		size = nodeData[aType].size;
 		selected = aSelected;
+		absoluteOffset = offset;
+		isLocked = (offset != -1);
 	}
 };
 
@@ -129,12 +160,11 @@ public:
 	size_t lastNodeCount = 0;
 	size_t lastTypeHash = 0;
 
-
 	uClass(int nodeCount, bool incrementCounter = true) {
 		size = 0;
 
 		for (int i = 0; i < nodeCount; i++) {
-			nodeBase node = {0, mem::x32 ? node_hex32 : node_hex64};
+			nodeBase node = { 0, mem::x32 ? node_hex32 : node_hex64 };
 			nodes.push_back(node);
 			size += nodeData[node.type].size;
 		}
@@ -161,6 +191,7 @@ public:
 
 	void sizeToNodes();
 	void resize(int size);
+	void normalizeNodes();
 	void drawNodes();
 	void drawStringBytes(int i, const BYTE* data, int pos, int size);
 	void drawOffset(int i, int pos);
@@ -183,6 +214,12 @@ public:
 	void drawVector4(int i, Vector4& value);
 	void drawVector3(int i, Vector3& value);
 	void drawVector2(int i, Vector2& value);
+	void drawVector4d(int i, Vector4d& value);
+	void drawVector3d(int i, Vector3d& value);
+	void drawVector2d(int i, Vector2d& value);
+	void drawUTF8(int i, const char* str);
+	void drawUTF16(int i, const wchar_t* str);
+	void drawUTF32(int i, const char32_t* str);
 	template<typename MatrixType>
 	void drawMatrixText(float xPadding, int rows, int columns, const MatrixType& value);
 	void drawMatrix4x4(int i, const Matrix4x4& value);
@@ -198,7 +235,53 @@ public:
 inline uClass g_PreviewClass(15);
 inline std::vector<uClass> g_Classes = { uClass(50) };
 
+inline void uClass::normalizeNodes() {
+	std::vector<nodeBase> newNodes;
+	int currentOffset = 0;
+
+	for (size_t i = 0; i < nodes.size(); i++) {
+		auto& node = nodes[i];
+
+		// If this node is locked to an absolute offset and we haven't reached it yet
+		if (node.isLocked && node.absoluteOffset > currentOffset) {
+			int paddingNeeded = node.absoluteOffset - currentOffset;
+
+			// Insert padding to reach the locked offset
+			while (paddingNeeded > 0) {
+				if (paddingNeeded >= 8) {
+					newNodes.emplace_back(nullptr, node_hex64, false, -1);
+					paddingNeeded -= 8;
+					currentOffset += 8;
+				}
+				else if (paddingNeeded >= 4) {
+					newNodes.emplace_back(nullptr, node_hex32, false, -1);
+					paddingNeeded -= 4;
+					currentOffset += 4;
+				}
+				else if (paddingNeeded >= 2) {
+					newNodes.emplace_back(nullptr, node_hex16, false, -1);
+					paddingNeeded -= 2;
+					currentOffset += 2;
+				}
+				else {
+					newNodes.emplace_back(nullptr, node_hex8, false, -1);
+					paddingNeeded -= 1;
+					currentOffset += 1;
+				}
+			}
+		}
+
+		newNodes.push_back(node);
+		currentOffset += node.size;
+	}
+
+	nodes = newNodes;
+	sizeToNodes();
+}
+
 inline std::string uClass::exportClass() {
+	normalizeNodes();
+
 	std::string exportedClass = std::format("class {} {{\npublic:", name);
 	int pad = 0;
 	for (auto& node : nodes) {
@@ -239,7 +322,7 @@ inline void uClass::sizeToNodes() {
 }
 
 inline void uClass::resize(int mod) {
-	assert(mod > 0 || mod == -8); // not intended
+	assert(mod > 0 || mod == -8);
 
 	int newSize = size + mod;
 	if (newSize < 1) {
@@ -248,7 +331,7 @@ inline void uClass::resize(int mod) {
 
 	if (mod < 0) {
 		nodes.erase(nodes.begin() + nodes.size() - 1);
-		sizeToNodes();
+		normalizeNodes();
 	}
 	else {
 		int remaining = mod;
@@ -270,7 +353,7 @@ inline void uClass::resize(int mod) {
 				nodes.emplace_back(nodeBase(nullptr, node_hex8, false));
 			}
 		}
-		sizeToNodes();
+		normalizeNodes();
 		memset(data, 0, size);
 	}
 }
@@ -292,12 +375,10 @@ inline void uClass::copyPopup(int i, std::string toCopy, std::string id) {
 	}
 }
 
-
-// TODO: cleanup the magic number hell below this point
 inline int uClass::drawVariableName(int i, nodeType type) {
 	auto& node = nodes[i];
 	ImVec2 nameSize = ImGui::CalcTextSize(node.name);
-	
+
 	auto& lData = nodeData[type];
 	auto typeName = lData.name;
 	ImVec2 typenameSize = ImGui::CalcTextSize(typeName);
@@ -307,11 +388,19 @@ inline int uClass::drawVariableName(int i, nodeType type) {
 	ImGui::Text("%s", typeName);
 	ImGui::PopStyleColor();
 
+	// Show lock icon if node is locked
+	if (node.isLocked) {
+		ImGui::SameLine();
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.0f, 1.0f));
+		ImGui::Text("[L]");
+		ImGui::PopStyleColor();
+	}
+
 	static char renameBuf[64] = { 0 };
 	static int renamedNode = -1;
 
 	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(.9f, .9f, .9f, 1.f));
-	ImGui::SetCursorPos(ImVec2(180 + typenameSize.x + 15, 0));
+	ImGui::SetCursorPos(ImVec2(180 + typenameSize.x + 15 + (node.isLocked ? 25 : 0), 0));
 	if (renamedNode != i) {
 		ImGui::Text(node.name);
 
@@ -337,23 +426,72 @@ inline int uClass::drawVariableName(int i, nodeType type) {
 	}
 	ImGui::PopStyleColor();
 
-	return typenameSize.x + nameSize.x;
+	return typenameSize.x + nameSize.x + (node.isLocked ? 25 : 0);
 }
 
 inline void uClass::drawBool(int i, bool value) {
-
 	float xPad = static_cast<float>(drawVariableName(i, node_bool));
-
 	ImGui::SetCursorPos(ImVec2(180 + xPad + 30, 0));
 	ImGui::Text(value ? "=  true" : "=  false");
+}
+
+inline void uClass::drawUTF8(int i, const char* str) {
+	float xPad = static_cast<float>(drawVariableName(i, node_utf8));
+
+	std::string displayStr(str);
+	if (displayStr.length() > 60) {
+		displayStr = displayStr.substr(0, 60) + "...";
+	}
+
+	ImGui::SetCursorPos(ImVec2(180 + xPad + 30, 0));
+	ImGui::PushStyleColor(ImGuiCol_Text, ImColor(252, 186, 3).Value);
+	ImGui::Text("=  \"%s\"", displayStr.c_str());
+	ImGui::PopStyleColor();
+
+	copyPopup(i, str, "utf8");
+}
+
+inline void uClass::drawUTF16(int i, const wchar_t* str) {
+	float xPad = static_cast<float>(drawVariableName(i, node_utf16));
+
+	std::wstring wstr(str);
+	std::string displayStr(wstr.begin(), wstr.end());
+	if (displayStr.length() > 60) {
+		displayStr = displayStr.substr(0, 60) + "...";
+	}
+
+	ImGui::SetCursorPos(ImVec2(180 + xPad + 30, 0));
+	ImGui::PushStyleColor(ImGuiCol_Text, ImColor(252, 186, 3).Value);
+	ImGui::Text("=  \"%s\"", displayStr.c_str());
+	ImGui::PopStyleColor();
+
+	copyPopup(i, displayStr, "utf16");
+}
+
+inline void uClass::drawUTF32(int i, const char32_t* str) {
+	float xPad = static_cast<float>(drawVariableName(i, node_utf32));
+
+	std::u32string u32str(str);
+	std::string displayStr;
+	for (char32_t c : u32str) {
+		if (c < 128) displayStr += static_cast<char>(c);
+		else displayStr += '?';
+	}
+	if (displayStr.length() > 60) {
+		displayStr = displayStr.substr(0, 60) + "...";
+	}
+
+	ImGui::SetCursorPos(ImVec2(180 + xPad + 30, 0));
+	ImGui::PushStyleColor(ImGuiCol_Text, ImColor(252, 186, 3).Value);
+	ImGui::Text("=  \"%s\"", displayStr.c_str());
+	ImGui::PopStyleColor();
+
+	copyPopup(i, displayStr, "utf32");
 }
 
 template<typename MatrixType>
 inline void uClass::drawMatrixText(float xPadding, int rows, int columns, const MatrixType& value)
 {
-	// for matrices, use the largest rendered number to decide the sizing for all
-	// it may not look perfect in all scenarios, but it is the most logical solution for most use cases
-
 	float mPad = 0;
 	float maxWidth = 0.f;
 	float y = 0;
@@ -379,111 +517,129 @@ inline void uClass::drawMatrixText(float xPadding, int rows, int columns, const 
 	}
 }
 
-
 inline void uClass::drawMatrix4x4(int i, const Matrix4x4& value) {
-
-	float xPad = static_cast<float>(drawVariableName(i, node_matrix3x4));
+	float xPad = static_cast<float>(drawVariableName(i, node_matrix4x4));
 	drawMatrixText(xPad, 4, 4, value);
 }
 
 inline void uClass::drawMatrix3x4(int i, const Matrix3x4& value) {
-
 	float xPad = static_cast<float>(drawVariableName(i, node_matrix3x4));
 	drawMatrixText(xPad, 3, 4, value);
 }
 
 inline void uClass::drawMatrix3x3(int i, const Matrix3x3& value) {
-
 	float xPad = static_cast<float>(drawVariableName(i, node_matrix3x3));
 	drawMatrixText(xPad, 3, 3, value);
 }
 
 inline void uClass::drawVector4(int i, Vector4& value) {
-
 	const float xPad = static_cast<float>(drawVariableName(i, node_vector4));
-
 	std::string vec = std::format("{:.3f}, {:.3f}, {:.3f}, {:.3f}", value.x, value.y, value.z, value.w);
 	std::string toDraw = std::format("=  ({})", vec);
 	ImGui::SetCursorPos(ImVec2(180.f + xPad + 30.f, 0));
 	ImGui::Text("%s", toDraw.c_str());
-
 	copyPopup(i, vec, "vec4");
 }
 
 inline void uClass::drawVector3(int i, Vector3& value) {
-
 	const float xPad = static_cast<float>(drawVariableName(i, node_vector3));
-
 	std::string vec = std::format("{:.3f}, {:.3f}, {:.3f}", value.x, value.y, value.z);
 	std::string toDraw = std::format("=  ({})", vec);
 	ImGui::SetCursorPos(ImVec2(180 + xPad + 30, 0));
 	ImGui::Text("%s", toDraw.c_str());
-
 	copyPopup(i, vec, "vec3");
 }
 
 inline void uClass::drawVector2(int i, Vector2& value) {
-
 	const float xPad = static_cast<float>(drawVariableName(i, node_vector2));
-
 	std::string vec = std::format("{:.3f}, {:.3f}", value.x, value.y);
 	std::string toDraw = std::format("=  ({})", vec);
 	ImGui::SetCursorPos(ImVec2(180 + xPad + 30, 0));
 	ImGui::Text("%s", toDraw.c_str());
-
 	copyPopup(i, vec, "vec2");
 }
 
+inline void uClass::drawVector4d(int i, Vector4d& value) {
+	const float xPad = static_cast<float>(drawVariableName(i, node_vector4d));
+	std::string vec = std::format("{:.6f}, {:.6f}, {:.6f}, {:.6f}", value.x, value.y, value.z, value.w);
+	std::string toDraw = std::format("=  ({})", vec);
+	ImGui::SetCursorPos(ImVec2(180.f + xPad + 30.f, 0));
+	ImGui::Text("%s", toDraw.c_str());
+	copyPopup(i, vec, "vec4d");
+}
+
+inline void uClass::drawVector3d(int i, Vector3d& value) {
+	const float xPad = static_cast<float>(drawVariableName(i, node_vector3d));
+	std::string vec = std::format("{:.6f}, {:.6f}, {:.6f}", value.x, value.y, value.z);
+	std::string toDraw = std::format("=  ({})", vec);
+	ImGui::SetCursorPos(ImVec2(180 + xPad + 30, 0));
+	ImGui::Text("%s", toDraw.c_str());
+	copyPopup(i, vec, "vec3d");
+}
+
+inline void uClass::drawVector2d(int i, Vector2d& value) {
+	const float xPad = static_cast<float>(drawVariableName(i, node_vector2d));
+	std::string vec = std::format("{:.6f}, {:.6f}", value.x, value.y);
+	std::string toDraw = std::format("=  ({})", vec);
+	ImGui::SetCursorPos(ImVec2(180 + xPad + 30, 0));
+	ImGui::Text("%s", toDraw.c_str());
+	copyPopup(i, vec, "vec2d");
+}
+
 inline void uClass::drawFloatVar(int i, float value) {
-
 	const float xPad = static_cast<float>(drawVariableName(i, node_float));
-
 	ImGui::SetCursorPos(ImVec2(180.f + xPad + 30, 0));
 	ImGui::Text("=  %.3f", value);
-
 	copyPopup(i, std::to_string(value), "float");
 }
 
 inline void uClass::drawDoubleVar(int i, double value) {
-
 	const float xPad = static_cast<float>(drawVariableName(i, node_double));
-
 	std::string toDraw = std::format("=  {:.6f}", value);
 	ImGui::SetCursorPos(ImVec2(180.f + xPad + 30, 0));
 	ImGui::Text("%s", toDraw.c_str());
-
 	copyPopup(i, std::to_string(value), "double");
 }
 
 inline void uClass::drawInteger(int i, int64_t value, nodeType type) {
-
 	const float xPad = static_cast<float>(drawVariableName(i, type));
-
 	ImGui::SetCursorPos(ImVec2(180.f + xPad + 30.f, 0));
 	ImGui::Text("=  %lld", value);
-
 	copyPopup(i, std::to_string(value), "int");
 }
 
 inline void uClass::drawUInteger(int i, uint64_t value, nodeType type) {
-
 	const float xPad = static_cast<float>(drawVariableName(i, type));
-
 	ImGui::SetCursorPos(ImVec2(180.f + xPad + 30.f, 0));
 	ImGui::Text("=  %llu", value);
-
 	copyPopup(i, std::to_string(value), "uint");
 }
 
 inline void uClass::changeType(nodeType newType) {
+	// Calculate current offset for each selected node
+	int currentOffset = 0;
 	for (int i = 0; i < static_cast<int>(nodes.size()); i++) {
 		auto& node = nodes[i];
 		if (node.selected) {
+			// Lock this node to its current offset
+			node.absoluteOffset = currentOffset;
+			node.isLocked = true;
+
 			int newNodes;
 			changeType(i, newType, true, &newNodes);
 			i += newNodes;
+
+			// Update currentOffset after the change
+			currentOffset = 0;
+			for (int j = 0; j <= i; j++) {
+				currentOffset += nodes[j].size;
+			}
+		}
+		else {
+			currentOffset += node.size;
 		}
 	}
+	normalizeNodes();
 }
 
 inline void uClass::changeType(int i, nodeType newType, bool selectNew, int* newNodes) {
@@ -491,27 +647,47 @@ inline void uClass::changeType(int i, nodeType newType, bool selectNew, int* new
 	auto oldSize = node.size;
 	auto typeSize = nodeData[newType].size;
 
+	// Calculate current offset for this node
+	int currentOffset = 0;
+	for (int j = 0; j < i; j++) {
+		currentOffset += nodes[j].size;
+	}
+
 	nodes.erase(nodes.begin() + i);
-	nodes.insert(nodes.begin() + i, { (newType > node_hex64) ? ("Var_" + std::to_string(varCounter++)).c_str() : 0, newType, selectNew});
+
+	// Create new node with locked offset if this node had a name
+	bool shouldLock = (strlen(node.name) > 0 && node.name[0] != 0) || node.isLocked;
+	nodeBase newNode = {
+		(newType > node_hex64) ? ("Var_" + std::to_string(varCounter++)).c_str() : nullptr,
+		newType,
+		selectNew,
+		shouldLock ? (node.isLocked ? node.absoluteOffset : currentOffset) : -1
+	};
+	newNode.isLocked = shouldLock;
+
+	// Copy name if it was a named variable
+	if (strlen(node.name) > 0 && newType > node_hex64) {
+		memcpy(newNode.name, node.name, sizeof(node.name));
+	}
+
+	nodes.insert(nodes.begin() + i, newNode);
 	int inserted = 1;
 
 	int sizeDiff = oldSize - typeSize;
 	while (sizeDiff > 0) {
 		if (sizeDiff >= 4) {
 			sizeDiff = sizeDiff - 4;
-			nodes.insert(nodes.begin() + i + inserted++, { nullptr, node_hex32, selectNew });
+			nodes.insert(nodes.begin() + i + inserted++, { nullptr, node_hex32, selectNew, -1 });
 		}
 		else if (sizeDiff >= 2) {
 			sizeDiff = sizeDiff - 2;
-			nodes.insert(nodes.begin() + i + inserted++, { nullptr, node_hex16, selectNew });
+			nodes.insert(nodes.begin() + i + inserted++, { nullptr, node_hex16, selectNew, -1 });
 		}
 		else if (sizeDiff >= 1) {
 			sizeDiff = sizeDiff - 1;
-			nodes.insert(nodes.begin() + i + inserted++, { nullptr, node_hex8, selectNew });
+			nodes.insert(nodes.begin() + i + inserted++, { nullptr, node_hex8, selectNew, -1 });
 		}
 	}
-
-	sizeToNodes();
 
 	lastTypeHash = 0;
 
@@ -519,6 +695,8 @@ inline void uClass::changeType(int i, nodeType newType, bool selectNew, int* new
 		*newNodes = inserted - 1;
 	}
 }
+
+// ... (continue with drawHexNumber, drawDouble, drawFloat, drawNumber, drawOffset, drawAddress, drawBytes, drawStringBytes - these stay the same)
 
 inline void uClass::drawHexNumber(int i, uintptr_t num, uintptr_t* ptrOut) {
 	cur_pad += 15;
@@ -772,7 +950,6 @@ inline void uClass::drawControllers(int i, int counter) {
 		}
 
 		if (ImGui::BeginMenu("Change Type")) {
-			// the ImVec2 just ensures the width of this menu
 			if (ImGui::Selectable("Hex8", false, 0, ImVec2(100, 0))) {
 				changeType(node_hex8);
 			}
@@ -842,6 +1019,18 @@ inline void uClass::drawControllers(int i, int counter) {
 
 			ImGui::Separator();
 
+			if (ImGui::Selectable("Vector4d")) {
+				changeType(node_vector4d);
+			}
+			if (ImGui::Selectable("Vector3d")) {
+				changeType(node_vector3d);
+			}
+			if (ImGui::Selectable("Vector2d")) {
+				changeType(node_vector2d);
+			}
+
+			ImGui::Separator();
+
 			if (ImGui::Selectable("Matrix4x4")) {
 				changeType(node_matrix4x4);
 			}
@@ -850,6 +1039,18 @@ inline void uClass::drawControllers(int i, int counter) {
 			}
 			if (ImGui::Selectable("Matrix3x3")) {
 				changeType(node_matrix3x3);
+			}
+
+			ImGui::Separator();
+
+			if (ImGui::Selectable("UTF8")) {
+				changeType(node_utf8);
+			}
+			if (ImGui::Selectable("UTF16")) {
+				changeType(node_utf16);
+			}
+			if (ImGui::Selectable("UTF32")) {
+				changeType(node_utf32);
 			}
 
 			ImGui::EndMenu();
@@ -886,11 +1087,28 @@ inline void uClass::drawControllers(int i, int counter) {
 					nodes.erase(nodes.begin() + j);
 				}
 			}
+			normalizeNodes();
 		}
 
+		// Add lock/unlock option
+		if (node.type > node_hex64) {
+			ImGui::Separator();
+			if (node.isLocked) {
+				if (ImGui::Selectable("Unlock Offset")) {
+					node.isLocked = false;
+					node.absoluteOffset = -1;
+				}
+			}
+			else {
+				if (ImGui::Selectable("Lock Offset")) {
+					node.isLocked = true;
+					node.absoluteOffset = counter;
+					normalizeNodes();
+				}
+			}
+		}
 
 		if (ImGui::BeginMenu("Copy")) {
-
 			uintptr_t fullAddress = this->address + counter;
 
 			if (ImGui::Selectable("Address")) {
@@ -902,11 +1120,7 @@ inline void uClass::drawControllers(int i, int counter) {
 			}
 
 			if (ImGui::Selectable("RVA")) {
-
-
-				// refresh loaded modules
 				mem::getModules();
-
 				bool foundIt = false;
 
 				for (auto module : mem::moduleList)
@@ -920,17 +1134,12 @@ inline void uClass::drawControllers(int i, int counter) {
 				}
 
 				if (!foundIt) {
-					// the RVA was not found for any loaded modules, indicate this for the user
 					showModuleMissingPopup = true;
 				}
 			}
 
 			if (ImGui::Selectable("Full RVA")) {
-
-
-				// refresh loaded modules
 				mem::getModules();
-
 				bool foundIt = false;
 
 				for (auto module : mem::moduleList)
@@ -945,7 +1154,6 @@ inline void uClass::drawControllers(int i, int counter) {
 				}
 
 				if (!foundIt) {
-					// the RVA was not found for any loaded modules, indicate this for the user
 					showModuleMissingPopup = true;
 				}
 			}
@@ -966,8 +1174,6 @@ inline void uClass::recalculateHeights() {
 	for (size_t i = 0; i < nodes.size(); i++) {
 		float nodeHeight = baseHeight;
 
-
-		// TODO: probably switch these to use macros in all use cases for matrix height eventually
 		switch (nodes[i].type) {
 		case node_matrix4x4:
 			nodeHeight = 15.0f * 4.0f + 8.0f;
@@ -984,9 +1190,14 @@ inline void uClass::recalculateHeights() {
 	}
 }
 
-
 inline void uClass::drawNodes() {
-	mem::read(this->address, this->data, this->size);
+	auto now = std::chrono::steady_clock::now();
+	bool should_update = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_LastClassUpdate) >= CLASS_UPDATE_INTERVAL;
+
+	if (should_update) {
+		mem::read(this->address, this->data, this->size);
+		g_LastClassUpdate = now;
+	}
 
 	ImVec2 parentSize = ImGui::GetContentRegionAvail();
 
@@ -1006,8 +1217,6 @@ inline void uClass::drawNodes() {
 	float scrollY = ImGui::GetScrollY();
 	float windowHeight = ImGui::GetWindowHeight();
 
-
-
 	int startIdx = 0, endIdx = nodes.size();
 
 	for (int i = 0; i < nodes.size(); i++) {
@@ -1019,9 +1228,6 @@ inline void uClass::drawNodes() {
 
 	for (int i = startIdx; i < nodes.size(); i++) {
 		if (totalHeight[i] > scrollY + windowHeight) {
-
-			// render 10 more rows than necessary, just to avoid some weird clipping with tons of matrices
-			// still clipping elements for performance, but it doesn't really matter if an extra few get rendered unnecessarily
 			endIdx = min(i + 10, static_cast<int>(nodes.size()));
 			break;
 		}
@@ -1056,7 +1262,6 @@ inline void uClass::drawNodes() {
 		{
 			drawStringBytes(i, data, counter, 1);
 			drawBytes(i, data, counter, 1);
-
 			auto num = *reinterpret_cast<int8_t*>(dataPos);
 			drawNumber(i, num);
 			drawHexNumber(i, num);
@@ -1066,7 +1271,6 @@ inline void uClass::drawNodes() {
 		{
 			drawStringBytes(i, data, counter, 2);
 			drawBytes(i, data, counter, 2);
-
 			auto num = *reinterpret_cast<int16_t*>(dataPos);
 			drawNumber(i, num);
 			drawHexNumber(i, num);
@@ -1076,10 +1280,8 @@ inline void uClass::drawNodes() {
 		{
 			drawStringBytes(i, data, counter, 4);
 			drawBytes(i, data, counter, 4);
-
 			auto fNum = *reinterpret_cast<float*>(dataPos);
 			drawFloat(i, fNum);
-
 			auto num = *reinterpret_cast<int32_t*>(dataPos);
 			drawNumber(i, num);
 			drawHexNumber(i, num, &clickedPointer);
@@ -1089,10 +1291,8 @@ inline void uClass::drawNodes() {
 		{
 			drawStringBytes(i, data, counter, 8);
 			drawBytes(i, data, counter, 8);
-
 			auto dNum = *reinterpret_cast<double*>(dataPos);
 			drawDouble(i, dNum);
-
 			auto num = *reinterpret_cast<int64_t*>(dataPos);
 			drawNumber(i, num);
 			drawHexNumber(i, num, &clickedPointer);
@@ -1137,6 +1337,15 @@ inline void uClass::drawNodes() {
 		case node_vector2:
 			drawVector2(i, *reinterpret_cast<Vector2*>(dataPos));
 			break;
+		case node_vector4d:
+			drawVector4d(i, *reinterpret_cast<Vector4d*>(dataPos));
+			break;
+		case node_vector3d:
+			drawVector3d(i, *reinterpret_cast<Vector3d*>(dataPos));
+			break;
+		case node_vector2d:
+			drawVector2d(i, *reinterpret_cast<Vector2d*>(dataPos));
+			break;
 		case node_matrix4x4:
 			drawMatrix4x4(i, *reinterpret_cast<Matrix4x4*>(dataPos));
 			break;
@@ -1149,6 +1358,15 @@ inline void uClass::drawNodes() {
 		case node_bool:
 			drawBool(i, *reinterpret_cast<bool*>(dataPos));
 			break;
+		case node_utf8:
+			drawUTF8(i, reinterpret_cast<const char*>(dataPos));
+			break;
+		case node_utf16:
+			drawUTF16(i, reinterpret_cast<const wchar_t*>(dataPos));
+			break;
+		case node_utf32:
+			drawUTF32(i, reinterpret_cast<const char32_t*>(dataPos));
+			break;
 		}
 
 		drawControllers(i, counter);
@@ -1160,8 +1378,6 @@ inline void uClass::drawNodes() {
 		}
 	}
 
-
-	// need to add a dummy before and after what is rendered to ensure the scroll position stays the same regardless of which elements are occluded
 	if (endIdx < static_cast<int>(nodes.size())) {
 		float remainingHeight = totalHeight[nodes.size()] - totalHeight[endIdx];
 		ImGui::Dummy(ImVec2(0.0f, remainingHeight));

@@ -1,7 +1,15 @@
 # ImClass Memory Viewer
 
-<img width="1209" height="499" alt="image" src="https://github.com/user-attachments/assets/bfa9c4f0-def8-4a83-84e4-e76b6bfab6a5" />
+## perception.cx Support
+- **WebSocket-based memory access** via Perception AngelScript bridge for safe remote memory operations
+- **Module enumeration** through PEB walking with cached module list
+- **String types**: UTF8, UTF16, UTF32 with configurable lengths
+- **Double-precision vectors**: Vector2d, Vector3d, Vector4d
+- **Offset locking system**: Lock variables to absolute offsets to prevent shifting when modifying structure above them
+- **Console window**: Real-time logging with copy-to-clipboard support
+- **Module list viewer**: Browse all loaded modules with base addresses and sizes
 
+<img width="1209" height="499" alt="image" src="https://github.com/user-attachments/assets/bfa9c4f0-def8-4a83-84e4-e76b6bfab6a5" />
 
 Inspired by [ReClass.NET](https://github.com/ReClassNET/ReClass.NET)
 
@@ -23,11 +31,14 @@ Using [Dear ImGui](https://github.com/ocornut/imgui) for immediate-mode renderin
   - Double
   - Bool
   - Vector 4 / Vector 3 / Vector 2
+  - Vector 4d / Vector 3d / Vector 2d
+  - UTF8 / UTF16 / UTF32
   - Matrix 4x4 / Matrix 3x4 / Matrix 3x3
 - Parsing for 0x... memory addresses
 - Support for address bar math operations
 - Module base address searching
 - Properly named module function exports
+- Offset locking to preserve variable positions
 
 ## Tips
 
@@ -40,6 +51,8 @@ Adding a library name to the address bar will result in its base address being u
 To view an export, put the library name appended by an exclamation mark and the export name into the address bar (ex. **kernel32.dll!ReadProcessMemory** or **kernel32.dll!WriteProcessMemory**)
 
 Entering an invalid operation into the address bar will just result in a zeroed out output currently.
+
+Right-click any named variable and select "Lock Offset" to prevent it from moving when you modify the structure above it.
 
 ## Contributing
 Feel free to contribute anything you'd like, and it will be accepted as long as we consider it beneficial to the project.
