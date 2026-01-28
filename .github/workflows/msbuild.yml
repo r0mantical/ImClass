@@ -45,7 +45,7 @@ jobs:
       with:
         tag_name: build-${{ github.run_number }}-${{ github.sha }}
         name: Commit "${{ github.event.head_commit.message }}"
-        files: x64/Release/ImClass.exe
+        files: x64/Release/skibiditoilet67.exe
         prerelease: true
         draft: false
         generate_release_notes: true
