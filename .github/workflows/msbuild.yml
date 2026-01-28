@@ -24,9 +24,9 @@ jobs:
       with:
         submodules: recursive
     
-    - name: Install Boost via vcpkg
+    - name: Install dependencies via vcpkg
       run: |
-        vcpkg install boost-beast:x64-windows boost-asio:x64-windows
+        vcpkg install boost-beast:x64-windows boost-asio:x64-windows nlohmann-json:x64-windows
         vcpkg integrate install
       shell: pwsh
     
