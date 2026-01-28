@@ -8,14 +8,12 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch:
+  workflow_dispatch:  # Enables manual triggering
 env:
   # Path to the solution file relative to the root of the project.
   SOLUTION_FILE_PATH: .
   # Configuration type to build.
   BUILD_CONFIGURATION: Release
-  BOOST_VERSION: 1.84.0
-  BOOST_ROOT: C:\boost
 permissions:
   contents: write
 jobs:
@@ -26,19 +24,10 @@ jobs:
       with:
         submodules: recursive
     
-    - name: Install Boost
+    - name: Install Boost via vcpkg
       run: |
-        $BOOST_VERSION_UNDERSCORE = "${{ env.BOOST_VERSION }}".Replace(".", "_")
-        $BOOST_URL = "https://boostorg.jfrog.io/artifactory/main/release/${{ env.BOOST_VERSION }}/source/boost_${BOOST_VERSION_UNDERSCORE}.7z"
-        
-        echo "Downloading Boost ${{ env.BOOST_VERSION }}..."
-        Invoke-WebRequest -Uri $BOOST_URL -OutFile boost.7z
-        
-        echo "Extracting Boost..."
-        7z x boost.7z -o"${{ env.BOOST_ROOT }}" -y
-        
-        echo "BOOST_ROOT=${{ env.BOOST_ROOT }}\boost_${BOOST_VERSION_UNDERSCORE}" >> $env:GITHUB_ENV
-        echo "Boost installed to: ${{ env.BOOST_ROOT }}\boost_${BOOST_VERSION_UNDERSCORE}"
+        vcpkg install boost-beast:x64-windows boost-asio:x64-windows
+        vcpkg integrate install
       shell: pwsh
     
     - name: Add MSBuild to PATH
@@ -46,6 +35,8 @@ jobs:
     
     - name: Build
       working-directory: ${{env.GITHUB_WORKSPACE}}
+      # Add additional options to the MSBuild command line here (like platform or verbosity level).
+      # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
       run: msbuild /m /p:Configuration=${{env.BUILD_CONFIGURATION}} /p:Platform=x64 ${{env.SOLUTION_FILE_PATH}}
     
     - name: Create Prerelease
